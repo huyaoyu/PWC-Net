@@ -17,22 +17,25 @@
 // == Dimension rearrangement Kernel
 __global__ void blob_rearrange_kernel2(const float *in, float *out, int num, int channels, int width, int height, int widthheight, int padding, int pwidthheight)
 {
-    int xy = blockIdx.x*blockDim.x + threadIdx.x;
+    int xy = blockIdx.x*blockDim.x + threadIdx.x; // Original pixel coordinate?
     if(xy>=widthheight)
         return;
 
-    int ch = blockIdx.y;
-    int n  = blockIdx.z;
+    int ch = blockIdx.y; // Tensor channel.
+    int n  = blockIdx.z; // Tensor batch.
 
-
+    // 2D pixel seems to be flattened as 1D vector of length widthheight.
+    // ( batch * channel num + channel index ) * total pixels + pixel index
     float value=in[(n*channels+ch)*widthheight+xy];
 
     __syncthreads();
 
-    int xpad  = (xy % width + padding);
-    int ypad  = (xy / width + padding);
-    int xypad = ypad * (width+2*padding) + xpad;
+    int xpad  = (xy % width + padding); // X-coordinate after padding.
+    int ypad  = (xy / width + padding); // Y-coordinate after padding.
+    int xypad = ypad * (width+2*padding) + xpad; // Index on the padded 2D images.
 
+    // (N, C, H, W) => (N, H, W, C) padded.
+    // pwdithheight is the pixel number of the padded image.
     out[(n*pwidthheight+xypad)*channels + ch] = value;
 }
 
@@ -74,7 +77,7 @@ __global__ void CorrelateData(const int nthreads, int num, int topwidth, int top
   // Load 3D patch into shared shared memory
   for(int j = 0; j < kernel_size; j++) { // HEIGHT
     for(int i = 0; i < kernel_size; i++) { // WIDTH
-      int ji_off = ((j * kernel_size) + i) * bottomchannels;
+      int ji_off = ((j * kernel_size) + i) * bottomchannels; // bottomchannels is nInPlane.
       for(int ch = ch_off; ch < bottomchannels; ch += (WARPS_PER_BLOCK*THREADS_PER_WARP)) { // CHANNELS
           int idx1 = ((item * bottomheight + y1+j) * bottomwidth + x1+i) * bottomchannels + ch;
           int idxPatchData = ji_off + ch;
@@ -88,6 +91,8 @@ __global__ void CorrelateData(const int nthreads, int num, int topwidth, int top
   __shared__ float sum[WARPS_PER_BLOCK*THREADS_PER_WARP];
   
   // Compute correlation
+  // Topchannels == D^2, the size of the search space in the second image around a center specified
+  // by the first image.
   for(int top_channel = 0; top_channel < topchannels; top_channel++) {
     sum[ch_off] = 0;
   
@@ -98,7 +103,7 @@ __global__ void CorrelateData(const int nthreads, int num, int topwidth, int top
       for(int i = 0; i < kernel_size; i++) { // WIDTH
         int ji_off = ((j * kernel_size) + i) * bottomchannels;
         for(int ch = ch_off; ch < bottomchannels; ch += (WARPS_PER_BLOCK*THREADS_PER_WARP)) { // CHANNELS
-          int x2 = x1 + s2o;
+          int x2 = x1 + s2o; // Could be out of the loops.
           int y2 = y1 + s2p;
           
           int idxPatchData = ji_off + ch;
@@ -111,13 +116,15 @@ __global__ void CorrelateData(const int nthreads, int num, int topwidth, int top
     
     __syncthreads();
     
-    if(ch_off == 0) {
+    if(ch_off == 0) { // Only the first thread in each block.
         float total_sum = 0;
         for(int idx = 0; idx < WARPS_PER_BLOCK*THREADS_PER_WARP; idx++) {
             total_sum += sum[idx];
         }
         const int sumelems = kernel_size*kernel_size*bottomchannels;
+        // blockIdx.x and blockIdx.y is the output xy location in the output plane.
         const int index = ((top_channel*topheight + blockIdx.y)*topwidth)+blockIdx.x;
+        // topcount is the number of values for one item in the batch.
         top[index + item*topcount] = total_sum / (float)sumelems;
     }
   }
@@ -168,7 +175,13 @@ __global__ void CorrelateDataSubtract(const int nthreads, int num, int item, int
 
 }
 
-void CorrelateData_ongpu(const float *rbot1, const float *rbot2, float *output, int batchSize, int nOutputCols, int nOutputRows, int nOutputPlane, int max_displacement, int neighborhood_grid_radius_, int neighborhood_grid_width_, int kernel_radius_, int kernel_size, int stride1, int stride2, int paddedbottomwidth, int paddedbottomheight, int nInputPlane, int corr_type_multiply, cudaStream_t stream)
+void CorrelateData_ongpu(const float *rbot1, const float *rbot2, float *output, 
+  int batchSize, int nOutputCols, int nOutputRows, int nOutputPlane, 
+  int max_displacement, 
+  int neighborhood_grid_radius_, int neighborhood_grid_width_, 
+  int kernel_radius_, int kernel_size, int stride1, int stride2, 
+  int paddedbottomwidth, int paddedbottomheight, 
+  int nInputPlane, int corr_type_multiply, cudaStream_t stream)
 {
 
     dim3 threadsPerBlock(THREADS_PER_WARP * WARPS_PER_BLOCK);
@@ -209,12 +222,18 @@ void CorrelateData_ongpu(const float *rbot1, const float *rbot2, float *output, 
 
 // == Correlation Backward Pass Kernel (For Blob 0)
 
+// num is the batch size.
+// nthreads: The number of input elements for each batch item
+// num: Batch number
+// item: Batch item.
 __global__ void CorrelateDataBackward0(const int nthreads, int num, int item, int topwidth, int topheight, int topchannels,
   int max_displacement, int neighborhood_grid_radius, int neighborhood_grid_width, int kernel_radius, int stride1, int stride2,
   int bottomwidth, int bottomheight, int pbottomwidth, int pbottomheight, int bottomchannels, int bottomcount, int pad_size,
-  float *bottom0diff, const float *bottom1, const float *topdiff) 
+  float *bottom0diff, // Returned.
+  const float *bottom1, const float *topdiff) 
 {
-  CUDA_KERNEL_LOOP(index, nthreads) {
+  // (index, nthreads) for (int index = blockIdx.x * blockDim.x + threadIdx.x; i < (nthreads); i += blockDim.x * gridDim.x)
+  CUDA_KERNEL_LOOP(index, nthreads) { // nthreads: The number of input elements for each batch item
     int n = index % bottomchannels; //channels
     int l = (index / bottomchannels) % bottomwidth + pad_size; //w-pos
     int m = (index / bottomchannels / bottomwidth) % bottomheight + pad_size; //h-pos
@@ -222,7 +241,7 @@ __global__ void CorrelateDataBackward0(const int nthreads, int num, int item, in
     //Get X,Y ranges and clamp
     // round_off is a trick to enable integer division with ceil, even for negative numbers
     // We use a large offset, for the inner part not to become negative.
-    const int round_off = ROUND_OFF;
+    const int round_off = ROUND_OFF; // ROUND_OFF 50000
     const int round_off_s1 = stride1 * round_off;
     
     // We add round_off before_s1 the int division and subtract round_off after it, to ensure the formula matches ceil behavior:
@@ -473,7 +492,15 @@ __global__ void CorrelateDataBackward1Subtract(const int nthreads, int num, int 
 
 }
 
-void CorrelateDataBackward_ongpu(const float *rbot1, const float *rbot2, const float *gradOutput, float *gradInput1, float *gradInput2, int batchSize, int nOutputCols, int nOutputRows, int nOutputPlane, int max_displacement, int neighborhood_grid_radius_, int neighborhood_grid_width_, int kernel_radius_, int stride1, int stride2, int nInputCols, int nInputRows, int paddedbottomwidth, int paddedbottomheight, int nInputPlane, int pad_size, int corr_type_multiply, cudaStream_t stream)
+void CorrelateDataBackward_ongpu(const float *rbot1, const float *rbot2, 
+  const float *gradOutput, 
+  float *gradInput1, float *gradInput2, // Two returned.
+  int batchSize, int nOutputCols, int nOutputRows, int nOutputPlane, 
+  int max_displacement, int neighborhood_grid_radius_, int neighborhood_grid_width_, 
+  int kernel_radius_, int stride1, int stride2, 
+  int nInputCols, int nInputRows, 
+  int paddedbottomwidth, int paddedbottomheight, int nInputPlane, 
+  int pad_size, int corr_type_multiply, cudaStream_t stream)
 {
     int inputCount = nInputPlane * nInputRows * nInputCols;
     int botThreadCount = inputCount;
@@ -481,6 +508,8 @@ void CorrelateDataBackward_ongpu(const float *rbot1, const float *rbot2, const f
     if (corr_type_multiply == 1) {
 
         // == Run kernel Backward 0
+        // GET_BLOCKS(n,t) (n+t-1)/t
+        // CUDA_NUM_THREADS = 1024
         for (int n = 0; n < batchSize; n++) {
             //Bottom0
             CorrelateDataBackward0<<<GET_BLOCKS(botThreadCount, CUDA_NUM_THREADS), CUDA_NUM_THREADS, 0, stream>>>(

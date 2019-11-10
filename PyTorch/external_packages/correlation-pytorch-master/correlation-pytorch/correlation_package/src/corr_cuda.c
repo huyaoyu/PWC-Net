@@ -70,7 +70,13 @@ int corr_cuda_forward(THCudaTensor *input1,
 
     blob_rearrange_ongpu(input2_data,rbot2_data,batchSize,nInputPlane,nInputCols,nInputRows,inputWidthHeight,pad_size,pwidthheight,stream);
 
-    CorrelateData_ongpu(rbot1_data,rbot2_data,output_data,batchSize,nOutputCols,nOutputRows,nOutputPlane,max_displacement,neighborhood_grid_radius_,neighborhood_grid_width_,kernel_radius_,kernel_size,stride1,stride2,paddedbottomwidth,paddedbottomheight,nInputPlane,corr_type_multiply,stream);
+    CorrelateData_ongpu(rbot1_data,rbot2_data,output_data,
+        batchSize,nOutputCols,nOutputRows,nOutputPlane,
+        max_displacement,
+        neighborhood_grid_radius_,neighborhood_grid_width_,
+        kernel_radius_,kernel_size,stride1,stride2,
+        paddedbottomwidth,paddedbottomheight,
+        nInputPlane,corr_type_multiply,stream);
 
 //    THCudaTensor_free(state, input1);
 //    THCudaTensor_free(state, input2);
@@ -86,8 +92,8 @@ int corr_cuda_backward(THCudaTensor *input1,
                         THCudaTensor *rbot1,
                         THCudaTensor *rbot2,
                         THCudaTensor *gradOutput,
-                        THCudaTensor *gradInput1,
-                        THCudaTensor *gradInput2,
+                        THCudaTensor *gradInput1, // Actual returned.
+                        THCudaTensor *gradInput2, // Acutal returned.
                         int pad_size,
                         int kernel_size,
                         int max_displacement,
@@ -149,7 +155,14 @@ int corr_cuda_backward(THCudaTensor *input1,
 
     // CorrelationLayerBackward
 
-    CorrelateDataBackward_ongpu(rbot1_data,rbot2_data,gradOutput_data,gradInput1_data,gradInput2_data,batchSize,nOutputCols,nOutputRows,nOutputPlane,max_displacement,neighborhood_grid_radius_,neighborhood_grid_width_,kernel_radius_,stride1,stride2,nInputCols,nInputRows,paddedbottomwidth,paddedbottomheight,nInputPlane,pad_size,corr_type_multiply,stream);
+    CorrelateDataBackward_ongpu(rbot1_data,rbot2_data,
+        gradOutput_data,
+        gradInput1_data,gradInput2_data, // Two returned.
+        batchSize,nOutputCols,nOutputRows,nOutputPlane,
+        max_displacement,neighborhood_grid_radius_,neighborhood_grid_width_,
+        kernel_radius_,stride1,stride2,
+        nInputCols,nInputRows,paddedbottomwidth,paddedbottomheight,nInputPlane,
+        pad_size,corr_type_multiply,stream);
 
 //    THCudaTensor_free(state, input1);
 //    THCudaTensor_free(state, input2);
